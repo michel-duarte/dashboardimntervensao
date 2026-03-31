@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Observatório Itajaí - Dashboard Mobilidade</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/esri-leaflet@3.0.10/dist/esri-leaflet.js"></script>
+    <script src="https://unpkg.com/esri-leaflet-vector@4.2.3/dist/esri-leaflet-vector.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { margin: 0; display: flex; flex-direction: column; height: 100vh; font-family: 'Segoe UI', Tahoma, sans-serif; background: #f8f9fa; }
+        #header { height: 60px; background: #2c3e50; color: white; display: flex; align-items: center; padding: 0 20px; justify-content: space-between; }
+        #map { flex: 1; z-index: 1; }
+        #dashboard { height: 35%; background: white; border-top: 4px solid #34495e; display: flex; padding: 15px; gap: 15px; box-sizing: border-box; }
+        .chart-container { flex: 1; position: relative; border: 1px solid #dee2e6; border-radius: 8px; padding: 10px; }
+        
+        /* --- ESTILO DO PAINEL LATERAL --- */
+        .info-panel { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.1); border: 1px solid #ccc; width: 240px; }
+        
+        /* Valor Selecionado Fixo no Topo/Centro do Painel */
+        .selected-value-display { 
+            text-align: center; 
+            background: #ecf0f1; 
+            padding: 8px; 
+            border-radius: 5px; 
+            margin-bottom: 15px;
+            border-left: 5px solid #27ae60;
+        }
+        #txt-hoje { font-size: 18px; color: #27ae60; font-weight: bold; display: block; }
+        .sub-label { font-size: 10px; color: #7f8c8d; text-transform: uppercase; }
+
+        .therm-container { display: flex; align-items: flex-start; position: relative; height: 160px; padding-left: 10px; }
+        
+        /* Termômetro */
+        .therm-wrapper { height: 150px; width: 22px; background: #eee; border-radius: 15px; position: relative; border: 2px solid #bdc3c7; }
+        .therm-bar { width: 100%; background: linear-gradient(to top, #2ecc71, #27ae60); position: absolute; bottom: 0; border-radius: 10px; transition: height 0.5s ease; }
+        
+        /* Seta que Navega */
+        #marker-today { 
+            position: absolute; 
+            right: -14px; 
+            width: 0; height: 0; 
+            border-top: 8px solid transparent; 
+            border-bottom: 8px solid transparent; 
+            border-right: 12px solid #2c3e50; 
+            transition: bottom 0.5s ease; 
+            margin-bottom: -8px; 
+            z-index: 10;
+        }
+
+        /* Labels de Recordes */
+        .labels-column { position: relative; height: 150px; margin-left: 20px; flex: 1; }
+        .record-label { position: absolute; font-size: 11px; width: 100%; color: #333; }
+        .label-max { top: -5px; border-top: 1px dashed #bdc3c7; padding-top: 2px; }
+        .label-min { bottom: -5px; border-bottom: 1px dashed #bdc3c7; padding-bottom: 2px; }
+        
+        .legend-box { clear: both; padding-top: 12px; border-top: 1px solid #eee; font-size: 11px; margin-top: 10px; }
+        .legend-box i { width: 10px; height: 10px; float: left; margin-right: 8px; border-radius: 50%; margin-top: 3px; }
+    </style>
+</head>
+<body>
+
+<div id="header">
+    <div><strong>Observatório Itajaí</strong> | Desempenho Viário</div>
+    <input type="date" id="dataSelector" value="2023-01-01">
+</div>
+
+<div id="map"></div>
+
+<div id="dashboard">
+    <div class="chart-container"><canvas id="chartEvol"></canvas></div>
+    <div class="chart-container"><canvas id="chartVeic"></canvas></div>
+</div>
+
+<script src="geometria_h3.js"></script>
+<script src="estatisticas_periodo.js"></script>
+
+<script>
+    const map = L.map('map').setView([-26.9068, -48.6778], 13);
+    L.esri.Vector.vectorTileLayer("7a110ef9198540068341e6908c6bf298", {
+        portalUrl: "https://arcgis.itajai.sc.gov.br/portal",
+        attribution: 'Prefeitura de Itajaí'
+    }).addTo(map);
+
+    let geoLayer, evolChart, veicChart, lastClickedLayer;
+
+    const infoControl = L.control({position: 'bottomright'});
+    infoControl.onAdd = function() {
+        const div = L.DomUtil.create('div', 'info-panel');
+        div.innerHTML = `
+            <div class="selected-value-display">
+                <span class="sub-label">Data Selecionada</span>
+                <span id="txt-hoje">0 verdes</span>
+            </div>
+            <div class="therm-container">
+                <div class="therm-wrapper">
+                    <div id="thermo-bar" class="therm-bar" style="height: 0%"></div>
+                    <div id="marker-today" style="bottom: 0%"></div>
+                </div>
+                <div class="labels-column">
+                    <div class="record-label label-max">
+                        <b>Recorde Máx</b><br>
+                        <span id="txt-max">0</span>
+                    </div>
+                    <div class="record-label label-min">
+                        <b>Recorde Mín</b><br>
+                        <span id="txt-min">0</span>
+                    </div>
+                </div>
+            </div>
+            <div class="legend-box">
+                <i style="background:#e74c3c"></i> Aumento | <i style="background:#f1c40f"></i> Estável | <i style="background:#2ecc71"></i> Redução
+            </div>`;
+        return div;
+    };
+    infoControl.addTo(map);
+
+    function carregarDados(dataStr) {
+        const old = document.getElementById('script-dia');
+        if (old) old.remove();
+        const script = document.createElement('script');
+        script.id = 'script-dia';
+        script.src = `dados_diarios/${dataStr}.js`;
+        script.onload = () => {
+            if (typeof dadosDia !== 'undefined') {
+                renderizarMapa(dadosDia);
+                atualizarTermometro(estatisticasPeriodo.historico[dataStr] || 0);
+            }
+        };
+        document.head.appendChild(script);
+    }
+
+    function atualizarTermometro(valor) {
+        const ep = estatisticasPeriodo;
+        const fmtData = (s) => {
+            if (!s) return "";
+            const p = s.split('-');
+            return `${p[2]}/${p[1]}/${p[0].slice(-2)}`;
+        };
+        
+        let pct = ((valor - ep.minVerdes) / (ep.maxVerdes - ep.minVerdes)) * 100;
+        if (isNaN(pct) || !isFinite(pct)) pct = 0;
+        pct = Math.max(0, Math.min(pct, 100));
+
+        // A seta navega na altura correta
+        document.getElementById('thermo-bar').style.height = pct + '%';
+        document.getElementById('marker-today').style.bottom = pct + '%';
+        
+        // O valor numérico fica fixo no display centralizado
+        document.getElementById('txt-hoje').innerText = valor + " verdes";
+        
+        // Recordes com datas
+        document.getElementById('txt-max').innerHTML = `${ep.maxVerdes} <small style="color:#7f8c8d">(${fmtData(ep.dataMax)})</small>`;
+        document.getElementById('txt-min').innerHTML = `${ep.minVerdes} <small style="color:#7f8c8d">(${fmtData(ep.dataMin)})</small>`;
+    }
+
+    function renderizarMapa(dados) {
+        if (geoLayer) map.removeLayer(geoLayer);
+        geoLayer = L.featureGroup().addTo(map);
+        Object.keys(dados).forEach(id => {
+            if (!geometriaH3[id]) return;
+            const diff = dados[id].m["6d"] - dados[id].m["6a"];
+            const cor = diff > 1000 ? '#e74c3c' : (diff < -1000 ? '#2ecc71' : '#f1c40f');
+            L.polygon(geometriaH3[id], {color: '#333', fillColor: cor, fillOpacity: 0.6, weight: 1, interactive: true})
+             .addTo(geoLayer).on('click', (e) => {
+                if (lastClickedLayer) lastClickedLayer.setStyle({ weight: 1 });
+                e.target.setStyle({ weight: 3 });
+                lastClickedLayer = e.target;
+                atualizarDashboard(dados[id], id);
+            });
+        });
+    }
+
+    function atualizarDashboard(info, id) {
+        if(evolChart) evolChart.destroy();
+        evolChart = new Chart(document.getElementById('chartEvol'), {
+            type: 'line',
+            data: {
+                labels: ['-6m', '-3m', '+3m', '+6m'],
+                datasets: [{ label: 'Custo Social R$', data: [info.m["6a"], info.m["3a"], info.m["3d"], info.m["6d"]], borderColor: '#2c3e50', fill: true, tension: 0.3 }]
+            },
+            options: { maintainAspectRatio: false }
+        });
+        const tipos = [...new Set([...Object.keys(info.va), ...Object.keys(info.vd)])];
+        if(veicChart) veicChart.destroy();
+        veicChart = new Chart(document.getElementById('chartVeic'), {
+            type: 'bar',
+            data: {
+                labels: tipos,
+                datasets: [
+                    { label: 'Antes', data: tipos.map(t => info.va[t] || 0), backgroundColor: '#bdc3c7' },
+                    { label: 'Depois', data: tipos.map(t => info.vd[t] || 0), backgroundColor: '#3498db' }
+                ]
+            },
+            options: { maintainAspectRatio: false }
+        });
+    }
+
+    document.getElementById('dataSelector').onchange = (e) => carregarDados(e.target.value);
+    window.onload = () => carregarDados("2023-01-01");
+</script>
+</body>
+</html>
